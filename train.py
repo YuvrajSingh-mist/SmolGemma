@@ -24,7 +24,7 @@ from datasets import load_dataset, concatenate_datasets
 # Load model directly
 from transformers import AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-70b-hf", token='...')
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-70b-hf", token='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')
 tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
 #liger kernels
@@ -196,7 +196,7 @@ def prepare_dataset(split, device, batch_size):
             collate_fn=collate_fn,
               
             drop_last=True,
-            shuffle=False
+            shuffle=True
         )
     return data_loader
 
@@ -610,7 +610,7 @@ print(summary(model=model,
 
 
 def save_text(file_path, step, text):
-    with open(file_path, 'a') as f:
+    with open(file_path, 'w') as f:
         f.write(f"Step {step}: {text}\n")
         
         
@@ -625,7 +625,7 @@ min_lr = 0.1 * ModelArgs.max_lr
 lr_decay_iters = 20000
 total_batch_size = 524288
 micro_batch_size = ModelArgs.batch_size
-gradient_accumulation_steps = total_batch_size // (micro_batch_size * (ModelArgs.block_size * torch.cuda.device_count()))
+gradient_accumulation_steps = total_batch_size // (micro_batch_size * (ModelArgs.block_size * 1))
 
 
 
@@ -702,14 +702,23 @@ def train():
                     val_iterator = iter(val_dataloader)
                     batch = next(val_iterator)
             
-                input_ids = batch["input_ids"].to(device)
+                idx = batch["input_ids"].to(device)
                 targets = batch["labels"].to(device)
                 
-                logits = model(input_ids)
-                batch_size, block_size, embeddings_dims = logits.shape
-                logits = logits.view(batch_size*block_size, embeddings_dims)
-                targets = targets.view(batch_size * block_size)
-                loss = nn.functional.cross_entropy(logits, targets)
+                if ModelArgs.use_liger:
+                    # Pass actual labels to the model to use optimized loss function
+                    loss = model(idx, actual_labels=targets)
+                else:
+                    # Standard cross entropy path
+                    logits = model(idx)
+                    batch_size, block_size, embeddings_dims = logits.shape
+                    
+                    logits = logits.view(batch_size*block_size, embeddings_dims)
+                    
+                    targets = targets.view(batch_size * block_size)
+                    
+                    loss = nn.functional.cross_entropy(logits, targets, ignore_index=tokenizer.pad_token_id)
+                
                 losses[k] = loss.item()
                 # count += 1
             out[split] = losses.mean()
@@ -720,6 +729,7 @@ def train():
     # Start training loop
     model.train()
     print("Lessgoo...")
+    print("gradient steps: ", gradient_accumulation_steps)
     dataloader = prepare_dataset('train', device, ModelArgs.batch_size)
     train_dataloader = iter(dataloader) 
     accumulated_loss = 0.0
@@ -739,7 +749,7 @@ def train():
                     "val_step_loss": losses['val'],
                     "step": step
                 })
-                
+            
             # Save checkpoint periodically
             if step % save_checkpoint_iter == 0 and step != 0:
                 print(f"Saving the model checkpoint for step: {step}")
@@ -756,7 +766,7 @@ def train():
             # # for batch in dataloader:
             # input_ids = batch["input_ids"].to(device)
             # targets = batch["labels"].to(device)
-            
+            accumulated_loss = 0.0  
             for micro_step in range(gradient_accumulation_steps):
                 
                 try:
@@ -770,7 +780,7 @@ def train():
         
                 targets = batch['labels'].to(device)
                 
-                token_count += len(idx * ModelArgs.batch_size)
+                token_count += len(idx) * ModelArgs.batch_size
                 
                 
                 # with torch.autocast(device_type=ModelArgs.device, dtype=torch.bfloat16):
@@ -850,14 +860,14 @@ def train():
                         # "Epoch": epoch
                         
             })
-            accumulated_loss = 0.0  
-            if(step % eval_iters == 0):
+            
+            if(step !=0 and step % eval_iters == 0):
                     prompt = "I am a Large Language Model  "
                     generated_text = topk_sampling(model, prompt, max_length=ModelArgs.block_size, top_k=50, temperature=1.0, device=device)
         
         
                     print(f" Step: {step} | Generated Text: {generated_text}")
-                    save_text(f"generated_data/generated_text_{step}", step, generated_text)
+                    save_text(f"generated_data/generated_text_{step}.txt", step, generated_text)
         # Finish wandb run
         wandb.finish()
 
